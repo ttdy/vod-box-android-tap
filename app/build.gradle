@@ -1,0 +1,61 @@
+apply plugin: 'com.android.application'
+
+def ksFile = System.getenv('VODBOX_KEYSTORE_FILE')
+def hasKs = ksFile != null && file(ksFile).exists()
+
+android {
+    namespace 'com.vodbox.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.vodbox.app.tap"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        externalNativeBuild {
+            cmake {
+                cppFlags ""
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+    splits {
+        abi {
+            enable true
+            reset()
+            include "arm64-v8a", "armeabi-v7a"
+            universalApk false
+        }
+    }
+    signingConfigs {
+        release {
+            if (hasKs) {
+                storeFile file(ksFile)
+                storePassword System.getenv('VODBOX_KEYSTORE_PASS')
+                keyAlias 'vodbox'
+                keyPassword System.getenv('VODBOX_KEYSTORE_PASS')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasKs) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+        }
+    }
+    sourceSets {
+        main {
+            jniLibs.srcDirs 'libnode/bin/'
+        }
+    }
+}

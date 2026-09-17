@@ -1,0 +1,107 @@
+name: build-apk-tap
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Gradle 8.9
+        run: |
+          curl -fsSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip
+          unzip -q /tmp/gradle.zip -d /opt
+          echo "/opt/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: 安装 Android SDK 组件
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmake;3.22.1" "ndk;25.2.9519653"
+
+      - name: 下载 nodejs-mobile libnode
+        run: bash scripts/fetch-libnode.sh
+
+      - name: 准备 nodejs-project assets
+        run: bash scripts/prepare-node-project.sh
+
+      - name: 还原签名 keystore
+        run: |
+          echo "${{ secrets.VODBOX_KEYSTORE_B64 }}" | base64 -d > /tmp/vodbox-release.jks
+
+      - name: 构建 release APK
+        env:
+          VODBOX_KEYSTORE_FILE: /tmp/vodbox-release.jks
+          VODBOX_KEYSTORE_PASS: ${{ secrets.VODBOX_KEYSTORE_PASS }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: 整理 APK 产物
+        run: |
+          set -e
+          mkdir -p /tmp/apks
+          cp app/build/outputs/apk/release/*.apk /tmp/apks/
+          ls -l /tmp/apks
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: vod-box-android-tap-apk
+          path: /tmp/apks/*.apk
+
+      - name: 发布 GitHub Release（作为升级下载源）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -m1 'versionName' app/build.gradle | sed -E 's/.*"([0-9.]+)".*/\1/')
+          TAG="v${VERSION}"
+          NOTE=$(git log -1 --pretty=%B | sed '/^$/d' | tr '\n' ' ' | cut -c1-200)
+          APKS=(/tmp/apks/*.apk)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "${NOTE:-自动构建产物}" >/dev/null 2>&1 || true
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${APKS[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "聚合影院连点版 $VERSION" --notes "${NOTE:-自动构建产物}" "${APKS[@]}"
+          fi
+
+      - name: 同步 update-tap.json（升级源）
+        env:
+          VOD_PAGES_TOKEN: ${{ secrets.VOD_PAGES_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VOD_PAGES_TOKEN:-}" ]; then
+            echo "::warning::未配置 VOD_PAGES_TOKEN，跳过 update-tap.json 自动同步"
+            exit 0
+          fi
+          VERSION=$(grep -m1 'versionName' app/build.gradle | sed -E 's/.*"([0-9.]+)".*/\1/')
+          VCODE=$(grep -m1 'versionCode' app/build.gradle | sed -E 's/.*versionCode[[:space:]]+([0-9]+).*/\1/')
+          NOTE=$(git log -1 --pretty=%B | sed '/^$/d' | tr '\n' ' ' | cut -c1-200)
+          NOTE="${NOTE:-聚合影院连点版 $VERSION}"
+          rm -rf /tmp/pages-site
+          git clone --depth 1 "https://x-access-token:${VOD_PAGES_TOKEN}@github.com/ttdy/ttdy.github.io.git" /tmp/pages-site
+          cd /tmp/pages-site
+          BASE="https://github.com/ttdy/vod-box-android-tap/releases/latest/download/"
+          jq -n --argjson vc "$VCODE" --arg v "$VERSION" --arg note "$NOTE" --arg b "$BASE" '{versionCode:$vc, versionName:$v, note:$note, apk:($b+"app-arm64-v8a-release.apk"), apkArm64:($b+"app-arm64-v8a-release.apk"), apkArm:($b+"app-armeabi-v7a-release.apk")}' > update-tap.json
+          git config user.name "vod-box-ci"
+          git config user.email "ci@vod-box.local"
+          git add update-tap.json
+          if git diff --cached --quiet; then
+            echo "update-tap.json 无变化，跳过推送"
+          else
+            git commit -m "chore: auto release tap v${VERSION}"
+            git push origin main
+          fi
