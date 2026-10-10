@@ -920,7 +920,7 @@
   }
   function syncStartTick() {
     if (syncTimerId) return;
-    syncTimerId = setInterval(syncTick, 30000);
+    syncTimerId = setInterval(syncTick, 300000);
   }
 
   function syncSnap() {
@@ -1005,7 +1005,7 @@
     const snap = syncSnap();
     if (snap === syncLastSnap) return;
     clearTimeout(syncPushTimer);
-    syncPushTimer = setTimeout(function () { syncPush(false); }, 10000);
+    syncPushTimer = setTimeout(function () { syncPush(false); }, 180000);
   }
 
   function syncOpenPanel() {
